@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "BananaShop FastAPI (hot reload :8070)",
+      "name": "BananaStore FastAPI (hot reload :8070)",
       "type": "debugpy",
       "request": "launch",
       "module": "uvicorn",

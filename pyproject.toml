@@ -1,15 +1,25 @@
 [tool.poetry]
-name = "bananashop"
+name = "bananastore"
 version = "0.1.0"
-description = "FastAPI static host for BananaShop image workspace"
-authors = ["Michael <michael@example.com>"]
+description = "Image generation done easy"
+license = "MIT"
+authors = ["Michael Ikemann"]
 readme = "README.md"
+repository = "https://github.com/Alyxion/BananaStore"
+keywords = ["image-generation", "openai", "google", "gemini", "fastapi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Topic :: Multimedia :: Graphics",
+]
 package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.13"
 fastapi = "^0.116.1"
-uvicorn = {extras = ["standard"], version = "^0.35.0"}
+uvicorn = { extras = ["standard"], version = "^0.35.0" }
 python-dotenv = "^1.1.1"
 pillow = "^11.3.0"
 python-multipart = "^0.0.20"

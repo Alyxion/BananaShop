@@ -24,11 +24,11 @@ const aiReplyRow = document.getElementById('aiReplyRow');
 const aiReplySpeakButton = document.getElementById('aiReplySpeakButton');
 const clearRefsButton = document.getElementById('clearRefsButton');
 const voiceButton = document.getElementById('voiceButton');
-const openAiVoiceButton = document.getElementById('openAiVoiceButton');
 const cameraButton = document.getElementById('cameraButton');
 const cameraInput = document.getElementById('cameraInput');
 const voicePopup = document.getElementById('voicePopup');
 const voiceCancelButton = document.getElementById('voiceCancelButton');
+const voiceSendButton = document.getElementById('voiceSendButton');
 const voicePopupNote = document.getElementById('voicePopupNote');
 const voiceWaveCanvas = document.getElementById('voiceWaveCanvas');
 const voiceBandsCanvas = document.getElementById('voiceBandsCanvas');
@@ -48,8 +48,39 @@ const lightboxDownloadButton = document.getElementById('lightboxDownloadButton')
 
 const dragHandle = document.getElementById('dragHandle');
 const windowShell = document.getElementById('windowShell');
+const mobileTabs = document.getElementById('mobileTabs');
+const layoutGrid = document.querySelector('.layout-grid');
 
 const GENERATION_TIMEOUT_MS = 120000;
+
+const isMobileLayout = () => window.innerWidth <= 900;
+
+const switchMobileTab = (tab) => {
+  layoutGrid.dataset.activeTab = tab;
+  mobileTabs.querySelectorAll('.mobile-tab').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.tab === tab);
+  });
+  if (tab === 'result') {
+    const badge = mobileTabs.querySelector('.tab-badge');
+    if (badge) badge.remove();
+  }
+};
+
+const notifyResultTab = () => {
+  if (!isMobileLayout() || layoutGrid.dataset.activeTab === 'result') return;
+  const resultBtn = mobileTabs.querySelector('[data-tab="result"]');
+  if (resultBtn && !resultBtn.querySelector('.tab-badge')) {
+    const dot = document.createElement('span');
+    dot.className = 'tab-badge';
+    resultBtn.appendChild(dot);
+  }
+};
+
+mobileTabs.addEventListener('click', (e) => {
+  const tab = e.target.closest('.mobile-tab');
+  if (!tab) return;
+  switchMobileTab(tab.dataset.tab);
+});
 
 let providers = {};
 
@@ -79,8 +110,6 @@ let lightboxScale = 1;
 let generationAbortController = null;
 let lightboxPanState = { active: false, startX: 0, startY: 0, scrollLeft: 0, scrollTop: 0 };
 let lightboxItems = [];
-let speechRecognition = null;
-let isRecording = false;
 let openAiRecorder = null;
 let openAiStream = null;
 let openAiChunks = [];
@@ -570,6 +599,10 @@ const generateImage = async () => {
     setGeneratedPreview(data.image_data_url);
     setImageHint(`${description.slice(0, 120)}${description.length > 120 ? '...' : ''} — ${data.provider}, ${data.size}`);
 
+    if (isMobileLayout()) {
+      switchMobileTab('result');
+    }
+
     const generatedFile = await dataUrlToFile(data.image_data_url, generatedFilename);
     addReferenceFiles([generatedFile], true);
 
@@ -721,78 +754,6 @@ cameraInput.addEventListener('change', () => {
   cameraInput.value = '';
 });
 
-const startVoice = () => {
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) {
-    setStatus('Speech recognition not supported in this browser.');
-    return;
-  }
-
-  if (isRecording && speechRecognition) {
-    speechRecognition.stop();
-    return;
-  }
-
-  speechRecognition = new SpeechRecognition();
-  speechRecognition.continuous = true;
-  speechRecognition.interimResults = true;
-  speechRecognition.lang = navigator.language || 'en-US';
-
-  const existingText = descriptionInput.value;
-  let finalTranscript = '';
-
-  speechRecognition.onstart = () => {
-    isRecording = true;
-    voiceButton.classList.add('recording');
-    voiceButton.title = 'Stop dictation';
-    setStatus('Listening... tap mic again to stop.');
-  };
-
-  speechRecognition.onresult = (event) => {
-    let interim = '';
-    finalTranscript = '';
-    for (let i = 0; i < event.results.length; i++) {
-      const transcript = event.results[i][0].transcript;
-      if (event.results[i].isFinal) {
-        finalTranscript += transcript;
-      } else {
-        interim += transcript;
-      }
-    }
-    const separator = existingText && !existingText.endsWith(' ') ? ' ' : '';
-    descriptionInput.value = existingText + separator + finalTranscript + interim;
-  };
-
-  speechRecognition.onerror = (event) => {
-    if (event.error !== 'aborted') {
-      setStatus(`Voice error: ${event.error}`);
-    }
-    stopVoice();
-  };
-
-  speechRecognition.onend = () => {
-    const separator = existingText && !existingText.endsWith(' ') ? ' ' : '';
-    if (finalTranscript) {
-      descriptionInput.value = existingText + separator + finalTranscript;
-    }
-    stopVoice();
-  };
-
-  speechRecognition.start();
-};
-
-const stopVoice = () => {
-  isRecording = false;
-  voiceButton.classList.remove('recording');
-  voiceButton.title = 'Dictate with microphone';
-  speechRecognition = null;
-  if (status.textContent.startsWith('Listening')) {
-    setStatus('Ready.');
-  }
-};
-
-voiceButton.addEventListener('click', startVoice);
-
 const formatVoiceTime = (seconds) => {
   const clamped = Math.max(0, seconds);
   const mm = String(Math.floor(clamped / 60)).padStart(2, '0');
@@ -930,6 +891,8 @@ const closeOpenAiVoicePopup = () => {
   openAiRecordingStartedAt = 0;
   openAiLastVoiceAt = 0;
   voicePopupNote.textContent = 'Listening...';
+  voiceButton.classList.remove('recording');
+  voiceButton.title = 'Talk me through your image idea';
   voicePopup.hidden = true;
 };
 
@@ -938,6 +901,15 @@ const stopOpenAiRecording = () => {
     openAiRecorder.stop();
   }
   clearOpenAiTimers();
+};
+
+const sendNowOpenAiRecording = () => {
+  if (!openAiRecorder || openAiRecorder.state === 'inactive') {
+    return;
+  }
+  voicePopupNote.textContent = 'Sending...';
+  openAiRecorder.requestData();
+  stopOpenAiRecording();
 };
 
 const startOpenAiRecording = async () => {
@@ -997,6 +969,8 @@ const startOpenAiRecording = async () => {
   openAiRecorder.start(250);
   openAiRecordingStartedAt = Date.now();
   openAiLastVoiceAt = openAiRecordingStartedAt;
+  voiceButton.classList.add('recording');
+  voiceButton.title = 'Listening...';
   voicePopupNote.textContent = 'Listening...';
 
   const renderFrame = () => {
@@ -1087,7 +1061,7 @@ const sendOpenAiRecording = async (recordedSeconds = 0) => {
 
     const base = descriptionInput.value.trim();
     descriptionInput.value = base ? `${base} ${text}` : text;
-    setStatus('OpenAI voice transcript added.');
+    setStatus('Voice transcript added.');
     closeOpenAiVoicePopup();
   } catch (error) {
     if (error.name === 'AbortError') {
@@ -1098,12 +1072,14 @@ const sendOpenAiRecording = async (recordedSeconds = 0) => {
   }
 };
 
-openAiVoiceButton.addEventListener('click', () => {
+voiceButton.addEventListener('click', () => {
+  voiceButton.classList.remove('recording');
   voicePopup.hidden = false;
   voicePopupNote.textContent = 'Listening...';
   startOpenAiRecording();
 });
 voiceCancelButton.addEventListener('click', closeOpenAiVoicePopup);
+voiceSendButton.addEventListener('click', sendNowOpenAiRecording);
 
 cancelButton.addEventListener('click', () => {
   if (generationAbortController) {
