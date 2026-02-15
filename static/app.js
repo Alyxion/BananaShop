@@ -843,7 +843,7 @@ const generateImage = async () => {
   const activeFormat = getActivePill(formatPills) || 'Photo';
   setGenerating(true);
   const loaderText = progressOverlay.querySelector('.loader-text');
-  if (loaderText) loaderText.textContent = activeFormat === 'Vector' ? 'Generating vector...' : 'Generating image...';
+  if (loaderText) loaderText.textContent = 'Peeling your idea...';
   setStatus('Generating...');
   const fileExt = activeFormat === 'Vector' ? 'svg' : 'png';
   const filenamePromise = suggestFilename(description, fileExt);
