@@ -76,4 +76,4 @@ docker-compose.yml   One-command proxy startup
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) — third-party licenses are listed in [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES).

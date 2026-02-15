@@ -16,18 +16,58 @@ from pydantic import BaseModel
 PROVIDER_CAPABILITIES: dict[str, dict[str, Any]] = {
     "openai": {
         "label": "OpenAI",
-        "sizes": ["1024x1024", "1536x1024", "1024x1536"],
         "qualities": ["auto", "low", "medium", "high"],
         "ratios": ["1:1", "3:2", "2:3"],
+        "ratioSizes": {"1:1": "1024x1024", "3:2": "1536x1024", "2:3": "1024x1536"},
+        "formats": ["Photo", "Vector"],
+        "formatQualities": {"Photo": ["auto", "low", "medium", "high"], "Vector": ["low", "medium", "high"]},
         "requiresKey": "OPENAI_API_KEY",
     },
     "google": {
         "label": "Google",
-        "sizes": ["1024x1024", "1280x720", "720x1280"],
         "qualities": ["standard", "hd"],
         "ratios": ["1:1", "16:9", "9:16"],
+        "ratioSizes": {"1:1": "1024x1024", "16:9": "1280x720", "9:16": "720x1280"},
+        "formats": ["Photo"],
         "requiresKey": "GOOGLE_API_KEY",
     },
+    "anthropic": {
+        "label": "Anthropic",
+        "qualities": ["low", "medium", "high"],
+        "ratios": ["1:1", "3:2", "2:3"],
+        "ratioSizes": {"1:1": "1024x1024", "3:2": "1536x1024", "2:3": "1024x1536"},
+        "formats": ["Vector"],
+        "requiresKey": "ANTHROPIC_API_KEY",
+    },
+}
+
+SVG_QUALITY_HINTS: dict[str, str] = {
+    "low": (
+        "Style: clean flat design. Use simple geometric shapes, solid fills, minimal paths. "
+        "No gradients or filters. Think app-icon or logo level simplicity."
+    ),
+    "medium": (
+        "Style: polished vector illustration. Use layered shapes with gradients for depth, "
+        "highlights, and shadows. Build complex objects by composing many precise smaller shapes "
+        "(e.g. a shoe = sole shape + upper shape + lace loops + tongue + stitching lines). "
+        "Each distinct part of the subject should be its own shape with correct proportions."
+    ),
+    "high": (
+        "Style: detailed, near-realistic vector illustration. Construct the subject from many "
+        "precise, anatomically/structurally correct sub-shapes. Every distinct part must be its "
+        "own carefully shaped path (e.g. a running shoe needs: outsole, midsole, upper panel, "
+        "toe box, heel counter, tongue, lace eyelets, individual laces, swoosh/logo area, "
+        "pull tab, stitching lines — each as separate paths with correct proportions). "
+        "Use linear and radial gradients for realistic shading and material texture. "
+        "Add subtle highlights, shadow layers, and edge detail. "
+        "Stay under ~1000 path elements for performance."
+    ),
+}
+
+SVG_QUALITY_TOKENS: dict[str, int] = {
+    "low": 4000,
+    "medium": 8000,
+    "high": 16000,
 }
 
 
@@ -36,6 +76,7 @@ class GenerateResponse(BaseModel):
     size: str
     quality: str
     ratio: str
+    format: str
     image_data_url: str
     used_reference_images: int
 
@@ -89,7 +130,7 @@ def _fallback_filename(description: str) -> str:
 
 def _sanitize_filename(raw: str, fallback: str) -> str:
     cleaned = normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
-    cleaned = cleaned.strip().lower().replace(".png", "")
+    cleaned = cleaned.strip().lower().replace(".png", "").replace(".svg", "")
     cleaned = re.sub(r"[^a-zA-Z0-9\s-]", "", cleaned)
     cleaned = re.sub(r"[-\s]+", "-", cleaned).strip("-")
     return (cleaned or fallback)[:80]
@@ -125,15 +166,179 @@ def _safe_provider_error(provider_name: str, response: httpx.Response) -> HTTPEx
     )
 
 
-async def _read_reference_images(reference_images: list[UploadFile] | None) -> list[tuple[str, bytes, str]]:
+async def _read_reference_images(
+    reference_images: list[UploadFile] | None,
+) -> tuple[list[tuple[str, bytes, str]], list[str]]:
     parsed: list[tuple[str, bytes, str]] = []
+    svg_sources: list[str] = []
     for file in reference_images or []:
         content = await file.read()
         if not content:
             continue
         mime = file.content_type or "application/octet-stream"
-        parsed.append((file.filename or "reference-image", content, mime))
-    return parsed
+        name = file.filename or "reference-image"
+        if mime == "image/svg+xml" or name.endswith(".svg"):
+            try:
+                svg_sources.append(content.decode("utf-8", errors="ignore"))
+            except Exception:
+                pass
+            continue
+        parsed.append((name, content, mime))
+    return parsed, svg_sources
+
+
+SVG_SYSTEM_PROMPT = (
+    "You are an expert SVG illustrator who creates structurally accurate vector art. "
+    "Output ONLY raw SVG markup — no markdown fences, no explanation, no extra text.\n\n"
+    "Technical requirements:\n"
+    '- xmlns="http://www.w3.org/2000/svg" attribute, viewBox "0 0 {width} {height}"\n'
+    "- No external resources (images, fonts, stylesheets) — inline styles only\n"
+    "- Web-safe fonts only (Arial, Helvetica, Georgia, Verdana, sans-serif, serif)\n\n"
+    "Critical illustration rules:\n"
+    "- BEFORE writing SVG, mentally decompose the subject into its real structural parts. "
+    "A shoe is not a dome — it has a flat sole, a low-profile upper, laces, a tongue, etc. "
+    "A car is not a blob — it has wheels, windows, a hood, doors, etc.\n"
+    "- Get the PROPORTIONS and SILHOUETTE right first. The overall outline must be "
+    "recognizable as the subject even without color or detail.\n"
+    "- Build from back to front using layered shapes — background elements first, "
+    "foreground details on top.\n"
+    "- Use <path> with precise d attributes for organic curves. Use basic shapes "
+    "(rect, circle, ellipse) where geometrically appropriate.\n\n"
+    "{quality_hint}\n\n"
+    "If reference images are provided, study their structure and proportions carefully."
+)
+
+
+def _parse_svg_dimensions(size: str) -> tuple[int, int]:
+    parts = size.split("x")
+    return int(parts[0]), int(parts[1])
+
+
+def _extract_svg(text: str) -> str:
+    match = re.search(r"<svg[\s\S]*?</svg>", text, re.IGNORECASE)
+    if not match:
+        raise HTTPException(status_code=502, detail="Model did not return valid SVG markup.")
+    svg = match.group(0)
+    if "xmlns" not in svg:
+        svg = svg.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"', 1)
+    return svg
+
+
+async def _generate_svg_with_openai(
+    description: str,
+    size: str,
+    quality: str,
+    ratio: str,
+    reference_images: list[tuple[str, bytes, str]],
+    svg_sources: list[str] | None = None,
+) -> str:
+    api_key = _ensure_api_key("OPENAI_API_KEY", "OpenAI")
+    width, height = _parse_svg_dimensions(size)
+    quality_hint = SVG_QUALITY_HINTS.get(quality, SVG_QUALITY_HINTS["medium"])
+    max_tokens = SVG_QUALITY_TOKENS.get(quality, 8000)
+    system_prompt = SVG_SYSTEM_PROMPT.format(width=width, height=height, quality_hint=quality_hint)
+
+    user_content: list[dict[str, Any]] = []
+    for _, content, mime_type in reference_images:
+        b64 = base64.b64encode(content).decode("utf-8")
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime_type};base64,{b64}"},
+        })
+    prompt_text = f"Create an SVG illustration: {description}. Target size: {size}, aspect ratio: {ratio}."
+    if svg_sources:
+        for i, src in enumerate(svg_sources, 1):
+            prompt_text += f"\n\nReference SVG {i} source (adjust as needed):\n{src}"
+    user_content.append({"type": "text", "text": prompt_text})
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-5.2",
+                "max_completion_tokens": max_tokens,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+            },
+        )
+
+    if response.status_code >= 400:
+        raise _safe_provider_error("OpenAI", response)
+
+    payload = response.json()
+    text = (((payload.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
+    svg = _extract_svg(text)
+    svg_b64 = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
+    return f"data:image/svg+xml;base64,{svg_b64}"
+
+
+async def _generate_with_anthropic(
+    description: str,
+    size: str,
+    quality: str,
+    ratio: str,
+    reference_images: list[tuple[str, bytes, str]],
+    svg_sources: list[str] | None = None,
+) -> str:
+    api_key = _ensure_api_key("ANTHROPIC_API_KEY", "Anthropic")
+    width, height = _parse_svg_dimensions(size)
+    quality_hint = SVG_QUALITY_HINTS.get(quality, SVG_QUALITY_HINTS["medium"])
+    max_tokens = SVG_QUALITY_TOKENS.get(quality, 8000)
+    system_prompt = SVG_SYSTEM_PROMPT.format(width=width, height=height, quality_hint=quality_hint)
+
+    ANTHROPIC_IMAGE_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+    user_content: list[dict[str, Any]] = []
+    for _, content, mime_type in reference_images:
+        if mime_type not in ANTHROPIC_IMAGE_MIMES:
+            continue
+        b64 = base64.b64encode(content).decode("utf-8")
+        user_content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": mime_type, "data": b64},
+        })
+    prompt_text = f"Create an SVG illustration: {description}. Target size: {size}, aspect ratio: {ratio}."
+    if svg_sources:
+        for i, src in enumerate(svg_sources, 1):
+            prompt_text += f"\n\nReference SVG {i} source (adjust as needed):\n{src}"
+    user_content.append({"type": "text", "text": prompt_text})
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "claude-opus-4-6",
+                "max_tokens": max_tokens,
+                "system": system_prompt,
+                "messages": [
+                    {"role": "user", "content": user_content},
+                ],
+            },
+        )
+
+    if response.status_code >= 400:
+        raise _safe_provider_error("Anthropic", response)
+
+    payload = response.json()
+    text_parts = [
+        block.get("text", "")
+        for block in (payload.get("content") or [])
+        if block.get("type") == "text"
+    ]
+    full_text = "\n".join(text_parts)
+    svg = _extract_svg(full_text)
+    svg_b64 = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
+    return f"data:image/svg+xml;base64,{svg_b64}"
 
 
 async def _generate_with_openai(
@@ -141,15 +346,20 @@ async def _generate_with_openai(
     size: str,
     quality: str,
     reference_images: list[tuple[str, bytes, str]],
+    svg_sources: list[str] | None = None,
 ) -> str:
     api_key = _ensure_api_key("OPENAI_API_KEY", "OpenAI")
     headers = {"Authorization": f"Bearer {api_key}"}
+    prompt = description
+    if svg_sources:
+        for i, src in enumerate(svg_sources, 1):
+            prompt += f"\n\nReference SVG {i} source (use as visual inspiration):\n{src}"
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         if reference_images:
             data = {
                 "model": "gpt-image-1",
-                "prompt": description,
+                "prompt": prompt,
                 "size": size,
                 "quality": quality,
                 "n": "1",
@@ -171,7 +381,7 @@ async def _generate_with_openai(
                 headers={**headers, "Content-Type": "application/json"},
                 json={
                     "model": "gpt-image-1",
-                    "prompt": description,
+                    "prompt": prompt,
                     "size": size,
                     "quality": quality,
                     "output_format": "png",
@@ -196,17 +406,19 @@ async def _generate_with_google(
     quality: str,
     ratio: str,
     reference_images: list[tuple[str, bytes, str]],
+    svg_sources: list[str] | None = None,
 ) -> str:
     api_key = _ensure_api_key("GOOGLE_API_KEY", "Google")
 
-    parts: list[dict[str, Any]] = [
-        {
-            "text": (
-                f"Generate one high quality image. Prompt: {description}. "
-                f"Requested size: {size}. Requested quality: {quality}. Requested aspect ratio: {ratio}."
-            )
-        }
-    ]
+    prompt_text = (
+        f"Generate one high quality image. Prompt: {description}. "
+        f"Requested size: {size}. Requested quality: {quality}. Requested aspect ratio: {ratio}."
+    )
+    if svg_sources:
+        for i, src in enumerate(svg_sources, 1):
+            prompt_text += f"\n\nReference SVG {i} source (use as visual inspiration):\n{src}"
+
+    parts: list[dict[str, Any]] = [{"text": prompt_text}]
 
     for _, content, mime_type in reference_images:
         parts.append(
@@ -303,7 +515,10 @@ async def _describe_image_with_openai(image_data_url: str, source_text: str, lan
             {
                 "role": "system",
                 "content": (
-                    "You describe images very briefly. Return one sentence only, between 30 and 40 words. "
+                    "You are a friendly artist commenting on an image you just created for someone. "
+                    "Speak naturally in first person — mention what you did with their idea, "
+                    "highlight a detail you're proud of, or note a creative choice you made. "
+                    "Keep it to one or two sentences, 25–40 words. Be warm but not over the top. "
                     f"{language_instruction} Avoid markdown, lists, and preambles."
                 ),
             },
@@ -311,7 +526,7 @@ async def _describe_image_with_openai(image_data_url: str, source_text: str, lan
                 "role": "user",
                 "content": [
                     {"type": "text", "text": f"SOURCE_TEXT: {source_text or 'N/A'}"},
-                    {"type": "text", "text": "Describe this image now."},
+                    {"type": "text", "text": "Comment on this image you just created for the user."},
                     {"type": "image_url", "image_url": {"url": image_data_url}},
                 ],
             },
@@ -472,31 +687,53 @@ async def tts_openai(payload: TtsRequest) -> Response:
 async def generate_image(
     provider: str = Form(...),
     description: str = Form(...),
-    size: str = Form(...),
     quality: str = Form(...),
     ratio: str = Form(...),
+    format: str = Form("Photo"),
     reference_images: list[UploadFile] | None = File(default=None),
 ) -> GenerateResponse:
     if provider not in PROVIDER_CAPABILITIES:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
     options = PROVIDER_CAPABILITIES[provider]
-    if size not in options["sizes"]:
-        raise HTTPException(status_code=400, detail=f"Unsupported size '{size}' for provider '{provider}'")
-    if quality not in options["qualities"]:
+    format_qualities = (options.get("formatQualities") or {}).get(format)
+    allowed_qualities = format_qualities or options["qualities"]
+    if quality not in allowed_qualities:
         raise HTTPException(status_code=400, detail=f"Unsupported quality '{quality}' for provider '{provider}'")
     if ratio not in options["ratios"]:
         raise HTTPException(status_code=400, detail=f"Unsupported ratio '{ratio}' for provider '{provider}'")
+    if format not in options["formats"]:
+        raise HTTPException(status_code=400, detail=f"Unsupported format '{format}' for provider '{provider}'")
 
-    parsed_reference_images = await _read_reference_images(reference_images)
-    reference_count = len(parsed_reference_images)
+    size = options["ratioSizes"].get(ratio, "1024x1024")
+    parsed_reference_images, svg_sources = await _read_reference_images(reference_images)
+    reference_count = len(parsed_reference_images) + len(svg_sources)
 
-    if provider == "openai":
+    if format == "Vector" and provider == "openai":
+        image_data_url = await _generate_svg_with_openai(
+            description=description,
+            size=size,
+            quality=quality,
+            ratio=ratio,
+            reference_images=parsed_reference_images,
+            svg_sources=svg_sources,
+        )
+    elif format == "Vector" and provider == "anthropic":
+        image_data_url = await _generate_with_anthropic(
+            description=description,
+            size=size,
+            quality=quality,
+            ratio=ratio,
+            reference_images=parsed_reference_images,
+            svg_sources=svg_sources,
+        )
+    elif provider == "openai":
         image_data_url = await _generate_with_openai(
             description=description,
             size=size,
             quality=quality,
             reference_images=parsed_reference_images,
+            svg_sources=svg_sources,
         )
     elif provider == "google":
         image_data_url = await _generate_with_google(
@@ -505,6 +742,7 @@ async def generate_image(
             quality=quality,
             ratio=ratio,
             reference_images=parsed_reference_images,
+            svg_sources=svg_sources,
         )
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
@@ -514,6 +752,7 @@ async def generate_image(
         size=size,
         quality=quality,
         ratio=ratio,
+        format=format,
         image_data_url=image_data_url,
         used_reference_images=reference_count,
     )

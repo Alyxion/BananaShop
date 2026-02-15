@@ -1,9 +1,8 @@
 const form = document.getElementById('generatorForm');
 const controlsPanel = document.querySelector('.controls');
-const providerSelect = document.getElementById('provider');
-const sizeSelect = document.getElementById('size');
-const qualitySelect = document.getElementById('quality');
-const ratioSelect = document.getElementById('ratio');
+const providerGroup = document.getElementById('providerGroup');
+const qualityPills = document.getElementById('qualityPills');
+const ratioPills = document.getElementById('ratioPills');
 const descriptionInput = document.getElementById('description');
 const referenceInput = document.getElementById('referenceImages');
 const previewImage = document.getElementById('previewImage');
@@ -24,8 +23,12 @@ const aiReplyRow = document.getElementById('aiReplyRow');
 const aiReplySpeakButton = document.getElementById('aiReplySpeakButton');
 const clearRefsButton = document.getElementById('clearRefsButton');
 const voiceButton = document.getElementById('voiceButton');
-const cameraButton = document.getElementById('cameraButton');
+const clearDescriptionButton = document.getElementById('clearDescriptionButton');
 const cameraInput = document.getElementById('cameraInput');
+const recentGallery = document.getElementById('recentGallery');
+const recentButton = document.getElementById('recentButton');
+const recentPopup = document.getElementById('recentPopup');
+const recentCloseButton = document.getElementById('recentCloseButton');
 const voicePopup = document.getElementById('voicePopup');
 const voiceCancelButton = document.getElementById('voiceCancelButton');
 const voiceSendButton = document.getElementById('voiceSendButton');
@@ -33,6 +36,13 @@ const voicePopupNote = document.getElementById('voicePopupNote');
 const voiceWaveCanvas = document.getElementById('voiceWaveCanvas');
 const voiceBandsCanvas = document.getElementById('voiceBandsCanvas');
 const voiceLoudnessCanvas = document.getElementById('voiceLoudnessCanvas');
+
+const formatGroup = document.getElementById('formatGroup');
+const formatPills = document.getElementById('formatPills');
+const downloadFormatPopup = document.getElementById('downloadFormatPopup');
+const downloadFormatCloseButton = document.getElementById('downloadFormatCloseButton');
+const downloadSvgButton = document.getElementById('downloadSvgButton');
+const downloadPngButton = document.getElementById('downloadPngButton');
 
 const lightbox = document.getElementById('lightbox');
 const lightboxTitle = document.getElementById('lightboxTitle');
@@ -84,18 +94,20 @@ mobileTabs.addEventListener('click', (e) => {
 
 let providers = {};
 
-const fallbackFilenameFromDescription = (description) => {
+const fallbackFilenameFromDescription = (description, ext = 'png') => {
   const fallback = description
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, '')
     .trim()
     .replace(/[-\s]+/g, '-')
     .slice(0, 80);
-  return `${fallback || 'generated-image'}.png`;
+  return `${fallback || 'generated-image'}.${ext}`;
 };
 let isGenerating = false;
 let generatedImageDataUrl = '';
 let generatedFilename = 'generated-image.png';
+let generatedFormat = 'Photo';
+let generatedSvgRaw = '';
 let aiNarrationEnabled = true;
 let lastAiReplyText = '';
 let lastAiReplyLanguage = 'en-US';
@@ -125,6 +137,11 @@ let openAiVisualRafId = null;
 let openAiLoudnessHistory = [];
 let openAiTranscribeAbortController = null;
 
+let recentDB = null;
+const RECENT_DB_NAME = 'BananaStoreDB';
+const RECENT_STORE = 'recentImages';
+const RECENT_LIMIT = 9;
+
 const OPENAI_VOICE_SILENCE_MS = 2500;
 const OPENAI_VOICE_SILENCE_THRESHOLD = 0.012;
 const OPENAI_VOICE_MAX_SECONDS = 90;
@@ -138,6 +155,8 @@ const setAiNarrationEnabled = (enabled) => {
   aiNarrationEnabled = Boolean(enabled);
   aiNarrationToggle.setAttribute('aria-pressed', aiNarrationEnabled ? 'true' : 'false');
   aiNarrationToggle.title = aiNarrationEnabled ? 'AI voice on' : 'AI voice off';
+  const icon = aiNarrationToggle.querySelector('i');
+  if (icon) icon.className = aiNarrationEnabled ? 'ph ph-speaker-high' : 'ph ph-speaker-slash';
   if (!aiNarrationEnabled && aiReplyAudio) {
     aiReplyAudio.pause();
   }
@@ -189,6 +208,36 @@ const requestOpenAiNarrationAudio = async (text, language) => {
   return response.blob();
 };
 
+const setAiReplyPlaying = (playing) => {
+  const icon = aiReplySpeakButton.querySelector('i');
+  const bars = aiReplySpeakButton.querySelector('.audio-bars');
+  if (playing) {
+    aiReplySpeakButton.classList.add('is-playing');
+    if (icon) icon.className = 'ph ph-stop';
+    if (!bars) {
+      const barsEl = document.createElement('span');
+      barsEl.className = 'audio-bars';
+      barsEl.innerHTML = '<span></span><span></span><span></span><span></span>';
+      aiReplySpeakButton.appendChild(barsEl);
+    }
+  } else {
+    aiReplySpeakButton.classList.remove('is-playing');
+    if (icon) icon.className = 'ph ph-speaker-high';
+    if (bars) bars.remove();
+  }
+};
+
+const stopAiReplyPlayback = () => {
+  if (aiReplyAudio) {
+    aiReplyAudio.pause();
+    aiReplyAudio.currentTime = 0;
+  }
+  if ('speechSynthesis' in window) {
+    window.speechSynthesis.cancel();
+  }
+  setAiReplyPlaying(false);
+};
+
 const playAndCacheAiReplyAudio = async (audioBlob) => {
   if (!audioBlob || !audioBlob.size) {
     throw new Error('No narration audio returned');
@@ -197,6 +246,11 @@ const playAndCacheAiReplyAudio = async (audioBlob) => {
   aiReplyAudioUrl = URL.createObjectURL(audioBlob);
   aiReplyAudio = new Audio(aiReplyAudioUrl);
   aiReplyAudio.preload = 'auto';
+  aiReplyAudio.addEventListener('ended', () => setAiReplyPlaying(false));
+  aiReplyAudio.addEventListener('pause', () => {
+    if (aiReplyAudio?.ended || aiReplyAudio?.currentTime === 0) setAiReplyPlaying(false);
+  });
+  setAiReplyPlaying(true);
   await aiReplyAudio.play();
 };
 
@@ -205,6 +259,7 @@ const replayCachedAiReplyAudio = async () => {
     return false;
   }
   aiReplyAudio.currentTime = 0;
+  setAiReplyPlaying(true);
   await aiReplyAudio.play();
   return true;
 };
@@ -252,6 +307,9 @@ const speakTextInLanguage = async (text, language, force = false) => {
     });
   }
 
+  utterance.addEventListener('end', () => setAiReplyPlaying(false));
+  utterance.addEventListener('error', () => setAiReplyPlaying(false));
+  setAiReplyPlaying(true);
   window.speechSynthesis.resume();
   window.speechSynthesis.cancel();
   window.speechSynthesis.speak(utterance);
@@ -278,11 +336,40 @@ const describeGeneratedImage = async (imageDataUrl, sourceText, language = '') =
   return (payload.description || '').trim();
 };
 
-const toOptionMarkup = (value) => {
-  const option = document.createElement('option');
-  option.value = value;
-  option.textContent = value;
-  return option;
+const PROVIDER_LOGOS = {
+  openai: '<svg class="provider-logo" viewBox="0 0 24 24" fill="currentColor"><path d="M22.28 9.37a6.3 6.3 0 0 0-.54-5.2 6.37 6.37 0 0 0-6.86-3.1A6.3 6.3 0 0 0 10.13 0a6.37 6.37 0 0 0-6.07 4.42 6.3 6.3 0 0 0-4.23 3.07 6.37 6.37 0 0 0 .79 7.47 6.3 6.3 0 0 0 .54 5.2 6.37 6.37 0 0 0 6.86 3.1A6.3 6.3 0 0 0 12.77 24a6.37 6.37 0 0 0 6.07-4.42 6.3 6.3 0 0 0 4.23-3.07 6.37 6.37 0 0 0-.79-7.14zM12.77 22.66a4.75 4.75 0 0 1-3.05-1.1l.15-.09 5.07-2.93a.82.82 0 0 0 .42-.72v-7.15l2.14 1.24a.08.08 0 0 1 .04.06v5.92a4.77 4.77 0 0 1-4.77 4.77zM3.67 18.5a4.74 4.74 0 0 1-.57-3.2l.15.09 5.07 2.93a.83.83 0 0 0 .83 0l6.19-3.57v2.47a.07.07 0 0 1-.03.06l-5.12 2.96a4.77 4.77 0 0 1-6.52-1.74zM2.34 7.9A4.74 4.74 0 0 1 4.82 5.8v6.03a.82.82 0 0 0 .41.71l6.19 3.57-2.14 1.24a.08.08 0 0 1-.07 0L4.09 14.4A4.77 4.77 0 0 1 2.34 7.9zm17.13 3.98-6.19-3.57 2.14-1.24a.08.08 0 0 1 .07 0l5.12 2.96a4.77 4.77 0 0 1-.74 8.6v-6.03a.83.83 0 0 0-.4-.72zm2.13-3.2-.15-.1-5.07-2.93a.83.83 0 0 0-.83 0l-6.19 3.58V6.75a.07.07 0 0 1 .03-.06l5.12-2.96a4.77 4.77 0 0 1 7.09 4.95zM9.47 13.37l-2.14-1.24a.08.08 0 0 1-.04-.06V6.15a4.77 4.77 0 0 1 7.82-3.67l-.15.09-5.07 2.93a.82.82 0 0 0-.42.72zm1.16-2.5L12.77 9.8l2.13 1.24v2.47l-2.13 1.24-2.14-1.24z"/></svg>',
+  google: '<svg class="provider-logo" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>',
+  anthropic: '<svg class="provider-logo" viewBox="0 0 24 24" fill="currentColor"><path d="M17.304 3.541h-3.672l6.696 16.918H24Zm-10.608 0L0 20.459h3.744l1.37-3.553h7.005l1.369 3.553h3.744L10.536 3.541Zm-.371 10.223L8.616 7.82l2.291 5.945Z"/></svg>',
+};
+
+const QUALITY_LABELS = {
+  auto: 'Auto',
+  low: 'Lo',
+  medium: 'Med',
+  high: 'Hi',
+  standard: 'Std',
+  hd: 'HD',
+};
+
+const renderPills = (container, values, selectedIndex = 0, labels = null) => {
+  container.innerHTML = '';
+  values.forEach((value, i) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `option-pill${i === selectedIndex ? ' active' : ''}`;
+    btn.dataset.value = value;
+    const label = labels?.[value];
+    if (label) {
+      btn.innerHTML = label;
+    } else {
+      btn.textContent = value;
+    }
+    btn.addEventListener('click', () => {
+      container.querySelectorAll('.option-pill').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+    });
+    container.appendChild(btn);
+  });
 };
 
 const setGenerating = (value) => {
@@ -290,8 +377,14 @@ const setGenerating = (value) => {
   controlsPanel.classList.toggle('locked', value);
   generateButton.disabled = value;
   progressOverlay.hidden = !value;
+  if (value) {
+    emptyPreview.hidden = true;
+  }
   if (!value) {
     generationAbortController = null;
+    if (!generatedImageDataUrl) {
+      emptyPreview.hidden = false;
+    }
   }
 };
 
@@ -310,20 +403,31 @@ const fetchWithTimeout = async (url, options, timeoutMs) => {
   }
 };
 
-const updateProviderOptions = () => {
-  const provider = providers[providerSelect.value];
-  if (!provider) {
-    return;
-  }
+const getActiveProvider = () => providerGroup.querySelector('.provider-btn.active')?.dataset.provider || '';
+const getActivePill = (container) => container.querySelector('.option-pill.active')?.dataset.value || '';
 
-  [sizeSelect, qualitySelect, ratioSelect].forEach((el) => {
-    el.innerHTML = '';
-  });
-
-  provider.sizes.forEach((item) => sizeSelect.appendChild(toOptionMarkup(item)));
-  provider.qualities.forEach((item) => qualitySelect.appendChild(toOptionMarkup(item)));
-  provider.ratios.forEach((item) => ratioSelect.appendChild(toOptionMarkup(item)));
+const updateQualityForFormat = () => {
+  const provider = providers[getActiveProvider()];
+  if (!provider) return;
+  const activeFormat = getActivePill(formatPills);
+  const fq = provider.formatQualities;
+  const qualities = (fq && activeFormat && fq[activeFormat]) || provider.qualities;
+  renderPills(qualityPills, qualities, 0, QUALITY_LABELS);
 };
+
+const updateProviderOptions = () => {
+  const provider = providers[getActiveProvider()];
+  if (!provider) return;
+  renderPills(ratioPills, provider.ratios);
+  const formats = provider.formats || ['Photo'];
+  renderPills(formatPills, formats);
+  formatGroup.hidden = formats.length <= 1;
+  updateQualityForFormat();
+};
+
+formatPills.addEventListener('click', (e) => {
+  if (e.target.closest('.option-pill')) updateQualityForFormat();
+});
 
 const updateReferenceActions = () => {
   const hasItems = referenceItems.length > 0;
@@ -351,13 +455,26 @@ const selectReference = (index) => {
   updateReferenceActions();
 };
 
+const makeUploadTile = (iconClass, handler) => {
+  const tile = document.createElement('div');
+  tile.className = 'upload-tile';
+  tile.innerHTML = `<i class="ph ${iconClass}"></i>`;
+  tile.addEventListener('click', handler);
+  ['dragenter', 'dragover'].forEach((evt) => {
+    tile.addEventListener(evt, (e) => { e.preventDefault(); tile.classList.add('drag-over'); });
+  });
+  ['dragleave', 'drop'].forEach((evt) => {
+    tile.addEventListener(evt, (e) => { e.preventDefault(); tile.classList.remove('drag-over'); });
+  });
+  tile.addEventListener('drop', (e) => {
+    const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/'));
+    if (files.length) addReferenceFiles(files, true);
+  });
+  return tile;
+};
+
 const renderReferenceGallery = () => {
   referenceGallery.innerHTML = '';
-
-  if (!referenceItems.length) {
-    updateReferenceActions();
-    return;
-  }
 
   referenceItems.forEach((item, index) => {
     const button = document.createElement('button');
@@ -383,6 +500,13 @@ const renderReferenceGallery = () => {
     button.addEventListener('dblclick', () => openLightbox('references', index));
     referenceGallery.appendChild(button);
   });
+
+  referenceGallery.appendChild(makeUploadTile('ph-plus', () => {
+    referenceInput.click();
+  }));
+  referenceGallery.appendChild(makeUploadTile('ph-camera', () => {
+    if (isTouchDevice()) cameraInput.click(); else captureFromWebcam();
+  }));
 
   updateReferenceActions();
 };
@@ -434,7 +558,170 @@ const dataUrlToFile = async (dataUrl, fileName) => {
   return new File([blob], fileName, { type: blob.type || 'image/png' });
 };
 
-const suggestFilename = async (description) => {
+const fileToDataUrl = (file) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(reader.result);
+  reader.onerror = () => reject(reader.error);
+  reader.readAsDataURL(file);
+});
+
+const svgDataUrlToPngDataUrl = (svgDataUrl, targetWidth = 2000) => new Promise((resolve, reject) => {
+  let aspectRatio = 1;
+  try {
+    const svgText = atob(svgDataUrl.split(',')[1]);
+    const vbMatch = svgText.match(/viewBox=["']\s*[\d.]+\s+[\d.]+\s+([\d.]+)\s+([\d.]+)/);
+    if (vbMatch) {
+      const vbW = parseFloat(vbMatch[1]);
+      const vbH = parseFloat(vbMatch[2]);
+      if (vbW > 0 && vbH > 0) aspectRatio = vbH / vbW;
+    }
+  } catch { /* ignore */ }
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = targetWidth;
+    canvas.height = Math.round(targetWidth * aspectRatio);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    resolve(canvas.toDataURL('image/png'));
+  };
+  img.onerror = () => reject(new Error('Failed to rasterize SVG'));
+  img.src = svgDataUrl;
+});
+
+const hashImageData = async (dataUrl) => {
+  const base64 = dataUrl.split(',')[1] || '';
+  if (crypto.subtle) {
+    const data = new TextEncoder().encode(base64);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    return Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  let h = 0;
+  for (let i = 0; i < base64.length; i += 1) {
+    h = ((h << 5) - h + base64.charCodeAt(i)) | 0;
+  }
+  return h.toString(16);
+};
+
+const createThumbnail = (dataUrl) => new Promise((resolve) => {
+  const img = new Image();
+  img.onload = () => {
+    const size = 82;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    const min = Math.min(img.width, img.height);
+    const sx = (img.width - min) / 2;
+    const sy = (img.height - min) / 2;
+    ctx.drawImage(img, sx, sy, min, min, 0, 0, size, size);
+    resolve(canvas.toDataURL('image/jpeg', 0.75));
+  };
+  img.src = dataUrl;
+});
+
+const initRecentDB = () => new Promise((resolve, reject) => {
+  const request = indexedDB.open(RECENT_DB_NAME, 1);
+  request.onupgradeneeded = (e) => {
+    const db = e.target.result;
+    if (!db.objectStoreNames.contains(RECENT_STORE)) {
+      const store = db.createObjectStore(RECENT_STORE, { keyPath: 'id', autoIncrement: true });
+      store.createIndex('hash', 'hash', { unique: false });
+      store.createIndex('timestamp', 'timestamp', { unique: false });
+    }
+  };
+  request.onsuccess = (e) => {
+    recentDB = e.target.result;
+    resolve(recentDB);
+  };
+  request.onerror = (e) => reject(e.target.error);
+});
+
+const getAllRecent = () => new Promise((resolve) => {
+  if (!recentDB) { resolve([]); return; }
+  const tx = recentDB.transaction(RECENT_STORE, 'readonly');
+  const store = tx.objectStore(RECENT_STORE);
+  const req = store.index('timestamp').getAll();
+  req.onsuccess = (e) => {
+    const items = e.target.result || [];
+    items.sort((a, b) => b.timestamp - a.timestamp);
+    resolve(items);
+  };
+  req.onerror = () => resolve([]);
+});
+
+const enforceRecentLimit = () => new Promise((resolve) => {
+  if (!recentDB) { resolve(); return; }
+  const tx = recentDB.transaction(RECENT_STORE, 'readwrite');
+  const store = tx.objectStore(RECENT_STORE);
+  store.index('timestamp').getAll().onsuccess = (e) => {
+    const all = e.target.result || [];
+    if (all.length > RECENT_LIMIT) {
+      all.sort((a, b) => a.timestamp - b.timestamp);
+      for (const item of all.slice(0, all.length - RECENT_LIMIT)) {
+        store.delete(item.id);
+      }
+    }
+  };
+  tx.oncomplete = () => resolve();
+  tx.onerror = () => resolve();
+});
+
+const addRecentImage = async (dataUrl, filename) => {
+  if (!recentDB) return;
+  try {
+    const hash = await hashImageData(dataUrl);
+    const thumbnail = await createThumbnail(dataUrl);
+    await new Promise((resolve, reject) => {
+      const tx = recentDB.transaction(RECENT_STORE, 'readwrite');
+      const store = tx.objectStore(RECENT_STORE);
+      store.index('hash').openCursor(IDBKeyRange.only(hash)).onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (cursor) {
+          const record = cursor.value;
+          record.timestamp = Date.now();
+          store.put(record);
+        } else {
+          store.add({ hash, thumbnail, dataUrl, filename: filename || 'image.png', timestamp: Date.now() });
+        }
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    await enforceRecentLimit();
+    renderRecentGallery();
+  } catch (err) {
+    console.warn('Failed to add recent image:', err);
+  }
+};
+
+const renderRecentGallery = async () => {
+  const items = await getAllRecent();
+  recentGallery.innerHTML = '';
+  recentButton.hidden = !items.length;
+  if (!items.length) {
+    recentPopup.hidden = true;
+    return;
+  }
+  items.forEach((item) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'recent-thumb';
+    button.title = item.filename;
+    const img = document.createElement('img');
+    img.src = item.thumbnail;
+    img.alt = item.filename;
+    button.appendChild(img);
+    button.addEventListener('click', async () => {
+      const file = await dataUrlToFile(item.dataUrl, item.filename);
+      addReferenceFiles([file], true);
+      recentPopup.hidden = true;
+    });
+    recentGallery.appendChild(button);
+  });
+};
+
+const suggestFilename = async (description, ext = 'png') => {
   try {
     const response = await fetch('/api/suggest-filename', {
       method: 'POST',
@@ -448,7 +735,7 @@ const suggestFilename = async (description) => {
 
     const payload = await response.json();
     const stem = (payload.filename || 'generated-image').trim() || 'generated-image';
-    return `${stem}.png`;
+    return `${stem}.${ext}`;
   } catch {
     const fallback = description
       .toLowerCase()
@@ -456,7 +743,7 @@ const suggestFilename = async (description) => {
       .trim()
       .replace(/[-\s]+/g, '-')
       .slice(0, 80);
-    return `${fallback || 'generated-image'}.png`;
+    return `${fallback || 'generated-image'}.${ext}`;
   }
 };
 
@@ -553,18 +840,21 @@ const generateImage = async () => {
   aiReplyRow.hidden = true;
 
   generationAbortController = new AbortController();
+  const activeFormat = getActivePill(formatPills) || 'Photo';
   setGenerating(true);
+  const loaderText = progressOverlay.querySelector('.loader-text');
+  if (loaderText) loaderText.textContent = activeFormat === 'Vector' ? 'Generating vector...' : 'Generating image...';
   setStatus('Generating...');
-
-  const filenamePromise = suggestFilename(description);
+  const fileExt = activeFormat === 'Vector' ? 'svg' : 'png';
+  const filenamePromise = suggestFilename(description, fileExt);
 
   try {
     const fd = new FormData();
-    fd.append('provider', providerSelect.value);
+    fd.append('provider', getActiveProvider());
     fd.append('description', description);
-    fd.append('size', sizeSelect.value);
-    fd.append('quality', qualitySelect.value);
-    fd.append('ratio', ratioSelect.value);
+    fd.append('quality', getActivePill(qualityPills));
+    fd.append('ratio', getActivePill(ratioPills));
+    fd.append('format', activeFormat);
     referenceItems.forEach((item) => fd.append('reference_images', item.file));
 
     const controller = generationAbortController;
@@ -590,7 +880,15 @@ const generateImage = async () => {
       throw new Error(data.detail || 'Generation failed');
     }
 
-    generatedFilename = fallbackFilenameFromDescription(description);
+    generatedFormat = data.format || 'Photo';
+    generatedSvgRaw = '';
+    if (generatedFormat === 'Vector' && data.image_data_url.startsWith('data:image/svg+xml;base64,')) {
+      try {
+        generatedSvgRaw = atob(data.image_data_url.split(',')[1]);
+      } catch { /* ignore decode errors */ }
+    }
+
+    generatedFilename = fallbackFilenameFromDescription(description, fileExt);
     const suggestedFilename = await Promise.race([
       filenamePromise,
       new Promise((resolve) => window.setTimeout(() => resolve(generatedFilename), 2500)),
@@ -605,11 +903,18 @@ const generateImage = async () => {
 
     const generatedFile = await dataUrlToFile(data.image_data_url, generatedFilename);
     addReferenceFiles([generatedFile], true);
+    addRecentImage(data.image_data_url, generatedFilename);
 
     let narrationErrorMessage = '';
     const language = inferSpeechLanguageFromText(description);
     try {
-      const reply = await describeGeneratedImage(data.image_data_url, description);
+      let narrationImageUrl = data.image_data_url;
+      if (generatedFormat === 'Vector') {
+        try {
+          narrationImageUrl = await svgDataUrlToPngDataUrl(data.image_data_url);
+        } catch { /* fall back to original data URL */ }
+      }
+      const reply = await describeGeneratedImage(narrationImageUrl, description);
       if (reply) {
         aiReply.textContent = reply;
         aiReplyRow.hidden = false;
@@ -635,11 +940,12 @@ referenceInput.addEventListener('change', () => {
   const files = Array.from(referenceInput.files || []);
   if (files.length) {
     addReferenceFiles(files, true);
+    files.forEach((file) => {
+      fileToDataUrl(file).then((dataUrl) => addRecentImage(dataUrl, file.name));
+    });
   }
   referenceInput.value = '';
 });
-
-providerSelect.addEventListener('change', updateProviderOptions);
 
 form.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -651,6 +957,10 @@ aiNarrationToggle.addEventListener('click', () => {
 });
 
 aiReplySpeakButton.addEventListener('click', () => {
+  if (aiReplySpeakButton.classList.contains('is-playing')) {
+    stopAiReplyPlayback();
+    return;
+  }
   const replayText = (lastAiReplyText || aiReply.textContent || '').trim();
   if (!replayText) {
     setStatus('No AI summary available to replay yet.');
@@ -663,23 +973,75 @@ aiReplySpeakButton.addEventListener('click', () => {
       if (!playedFromCache) {
         return speakTextInLanguage(replayText, replayLanguage, true);
       }
+      setAiReplyPlaying(true);
       return undefined;
     })
     .catch((error) => {
+      setAiReplyPlaying(false);
       setStatus(error.message || 'Replay failed.');
     });
 });
 
 previewImage.addEventListener('click', () => openLightbox('generated'));
 
+const showDownloadFormatPopup = () => {
+  downloadFormatPopup.hidden = false;
+};
+
+const hideDownloadFormatPopup = () => {
+  downloadFormatPopup.hidden = true;
+};
+
+const downloadAsSvg = (svgRaw, filename) => {
+  const blob = new Blob([svgRaw], { type: 'image/svg+xml' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename.endsWith('.svg') ? filename : filename.replace(/\.\w+$/, '.svg');
+  link.click();
+  URL.revokeObjectURL(url);
+};
+
+const downloadAsPng = async (svgDataUrl, filename) => {
+  try {
+    const pngDataUrl = await svgDataUrlToPngDataUrl(svgDataUrl);
+    const link = document.createElement('a');
+    link.href = pngDataUrl;
+    link.download = filename.replace(/\.\w+$/, '.png');
+    link.click();
+  } catch (err) {
+    setStatus(`PNG conversion failed: ${err.message}`);
+  }
+};
+
 downloadButton.addEventListener('click', () => {
   if (!generatedImageDataUrl) {
+    return;
+  }
+  if (generatedFormat === 'Vector') {
+    showDownloadFormatPopup();
     return;
   }
   const link = document.createElement('a');
   link.href = generatedImageDataUrl;
   link.download = generatedFilename;
   link.click();
+});
+
+downloadFormatCloseButton.addEventListener('click', hideDownloadFormatPopup);
+
+downloadSvgButton.addEventListener('click', () => {
+  hideDownloadFormatPopup();
+  if (generatedSvgRaw) {
+    downloadAsSvg(generatedSvgRaw, generatedFilename);
+  }
+});
+
+downloadPngButton.addEventListener('click', () => {
+  hideDownloadFormatPopup();
+  if (generatedImageDataUrl) {
+    downloadAsPng(generatedImageDataUrl, generatedFilename);
+  }
 });
 
 clearRefsButton.addEventListener('click', () => clearReferences());
@@ -728,28 +1090,26 @@ const captureFromWebcam = async () => {
     canvas.height = video.videoHeight;
     canvas.getContext('2d').drawImage(video, 0, 0);
     cleanup();
+    const captureDataUrl = canvas.toDataURL('image/png');
     canvas.toBlob((blob) => {
       if (blob) {
-        const file = new File([blob], `camera-${Date.now()}.png`, { type: 'image/png' });
+        const fileName = `camera-${Date.now()}.png`;
+        const file = new File([blob], fileName, { type: 'image/png' });
         addReferenceFiles([file], true);
+        addRecentImage(captureDataUrl, fileName);
         setStatus('Photo captured and added to references.');
       }
     }, 'image/png');
   });
 };
 
-cameraButton.addEventListener('click', () => {
-  if (isTouchDevice()) {
-    cameraInput.click();
-  } else {
-    captureFromWebcam();
-  }
-});
-
 cameraInput.addEventListener('change', () => {
   const files = Array.from(cameraInput.files || []);
   if (files.length) {
     addReferenceFiles(files, true);
+    files.forEach((file) => {
+      fileToDataUrl(file).then((dataUrl) => addRecentImage(dataUrl, file.name));
+    });
   }
   cameraInput.value = '';
 });
@@ -1061,6 +1421,7 @@ const sendOpenAiRecording = async (recordedSeconds = 0) => {
 
     const base = descriptionInput.value.trim();
     descriptionInput.value = base ? `${base} ${text}` : text;
+    updateClearButton();
     setStatus('Voice transcript added.');
     closeOpenAiVoicePopup();
   } catch (error) {
@@ -1071,6 +1432,18 @@ const sendOpenAiRecording = async (recordedSeconds = 0) => {
     voicePopupNote.textContent = error.message || 'Transcription failed.';
   }
 };
+
+const updateClearButton = () => {
+  clearDescriptionButton.hidden = !descriptionInput.value.trim();
+};
+
+descriptionInput.addEventListener('input', updateClearButton);
+
+clearDescriptionButton.addEventListener('click', () => {
+  descriptionInput.value = '';
+  descriptionInput.focus();
+  updateClearButton();
+});
 
 voiceButton.addEventListener('click', () => {
   voiceButton.classList.remove('recording');
@@ -1102,6 +1475,10 @@ lightboxNextButton.addEventListener('click', () => cycleLightbox(1));
 lightboxDownloadButton.addEventListener('click', () => {
   const item = lightboxItems[lightboxIndex];
   if (!item) return;
+  if (lightboxIndex === 0 && generatedFormat === 'Vector' && generatedSvgRaw) {
+    showDownloadFormatPopup();
+    return;
+  }
   const link = document.createElement('a');
   link.href = item.url;
   link.download = item.filename;
@@ -1136,6 +1513,10 @@ window.addEventListener('pointerup', () => {
   }
 });
 window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !downloadFormatPopup.hidden) {
+    hideDownloadFormatPopup();
+    return;
+  }
   if (lightbox.hidden) {
     return;
   }
@@ -1191,15 +1572,44 @@ const loadProviders = async () => {
   const payload = await response.json();
   providers = payload.providers || {};
 
-  providerSelect.innerHTML = '';
+  providerGroup.innerHTML = '';
+  let first = true;
   Object.entries(providers).forEach(([id, provider]) => {
-    const option = toOptionMarkup(id);
-    option.textContent = provider.hasKey ? provider.label : `${provider.label} (no API key)`;
-    providerSelect.appendChild(option);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `provider-btn${first ? ' active' : ''}`;
+    btn.dataset.provider = id;
+    const logo = PROVIDER_LOGOS[id] || '<i class="ph ph-robot"></i>';
+    const keyHint = provider.hasKey ? '' : ' <span class="no-key">(no key)</span>';
+    btn.innerHTML = `${logo}<span>${provider.label}${keyHint}</span>`;
+    btn.addEventListener('click', () => {
+      providerGroup.querySelectorAll('.provider-btn').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      updateProviderOptions();
+    });
+    providerGroup.appendChild(btn);
+    first = false;
   });
 
   updateProviderOptions();
 };
+
+recentButton.addEventListener('click', () => {
+  recentPopup.hidden = !recentPopup.hidden;
+});
+
+recentCloseButton.addEventListener('click', () => {
+  recentPopup.hidden = true;
+});
+
+document.addEventListener('pointerdown', (e) => {
+  if (!recentPopup.hidden && !recentPopup.contains(e.target) && e.target !== recentButton && !recentButton.contains(e.target)) {
+    recentPopup.hidden = true;
+  }
+  if (!downloadFormatPopup.hidden && e.target === downloadFormatPopup) {
+    hideDownloadFormatPopup();
+  }
+});
 
 const start = async () => {
   try {
@@ -1207,6 +1617,7 @@ const start = async () => {
     await loadProviders();
     makeWindowDraggable();
     renderReferenceGallery();
+    try { await initRecentDB(); renderRecentGallery(); } catch (e) { console.warn('Recent images DB unavailable:', e); }
     setStatus('Ready. Upload references or generate directly.');
   } catch (error) {
     setStatus(error.message || 'Could not initialize app');
